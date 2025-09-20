@@ -10,11 +10,10 @@ COLLECTOR_SA_EMAIL="${COLLECTOR_SA_EMAIL:-zurea-collector@cloudworks-gcp.iam.gse
 # Defaults (customers can override via flags)
 EVIDENCE_SA_NAME="${EVIDENCE_SA_NAME:-zurea-evidence}"
 CUSTOM_ROLE_ID="${CUSTOM_ROLE_ID:-zureaBucketMetadataViewer}"
-USE_BASIC_VIEWER="${USE_BASIC_VIEWER:-0}"   # set --use-basic-viewer to grant roles/viewer instead of custom role
 
 usage() {
   cat <<USG >&2
-Usage: $0 --project <PROJECT_ID> [--sa-name <NAME>] [--use-basic-viewer]
+Usage: $0 --project <PROJECT_ID> [--sa-name <NAME>]
 
 Creates service account and grants read-only access to list buckets and read encryption metadata.
 Then grants your collector SA impersonation and verifies access.
@@ -24,11 +23,10 @@ Required:
 
 Optional:
   --sa-name <NAME>              Evidence SA name (default: ${EVIDENCE_SA_NAME})
-  --use-basic-viewer            Use roles/viewer instead of the least-priv custom role
 
 Environment overrides (advanced):
   COLLECTOR_SA_EMAIL=<your-collector@HOST.iam.gserviceaccount.com>
-  EVIDENCE_SA_NAME=<name>  CUSTOM_ROLE_ID=<id>  USE_BASIC_VIEWER=0|1
+  EVIDENCE_SA_NAME=<name>  CUSTOM_ROLE_ID=<id>
 USG
   exit 1
 }
@@ -39,7 +37,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT_ID="$2"; shift 2;;
     --sa-name) EVIDENCE_SA_NAME="$2"; shift 2;;
-    --use-basic-viewer) USE_BASIC_VIEWER=1; shift;;
     *) usage;;
   esac
 done
@@ -73,27 +70,45 @@ else
 fi
 
 # ====== Grant minimal permissions to Evidence SA ======
-if [[ "${USE_BASIC_VIEWER}" -eq 0 ]]; then
-  # Least-priv custom role: list buckets + read metadata
-  echo ">> Ensuring custom role '${CUSTOM_ROLE_ID}' with bucket metadata permissions..."
-  if ! gcloud iam roles describe "${CUSTOM_ROLE_ID}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-    gcloud iam roles create "${CUSTOM_ROLE_ID}" \
-      --project "${PROJECT_ID}" \
-      --title="Zurea Bucket Metadata Viewer" \
-      --permissions="storage.buckets.list,storage.buckets.get" \
-      --stage="GA" >/dev/null
-  fi
-  echo ">> Granting custom role to Evidence SA..."
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${EVIDENCE_SA_EMAIL}" \
-    --role="projects/${PROJECT_ID}/roles/${CUSTOM_ROLE_ID}" >/dev/null
+# Least-priv custom role: list buckets + read metadata
+echo ">> Ensuring custom role '${CUSTOM_ROLE_ID}' with bucket metadata permissions..."
+if ! gcloud iam roles describe "${CUSTOM_ROLE_ID}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud iam roles create "${CUSTOM_ROLE_ID}" \
+    --project "${PROJECT_ID}" \
+    --title="Zurea Bucket Metadata Viewer" \
+    --description="List buckets and read bucket-level config only (no object access)." \
+    --permissions="storage.buckets.list,storage.buckets.get" \
+    --stage="GA" >/dev/null
 else
-  # Broader read: project Viewer (includes bucket list/get)
-  echo ">> Granting roles/viewer to Evidence SA (broader read)..."
+  # Keep role metadata aligned (idempotent)
+  gcloud iam roles update "${CUSTOM_ROLE_ID}" \
+    --project "${PROJECT_ID}" \
+    --title="Zurea Bucket Metadata Viewer" \
+    --description="List buckets and read bucket-level config only (no object access)." \
+    --stage="GA" >/dev/null
+fi
+echo ">> Granting custom role to Evidence SA..."
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${EVIDENCE_SA_EMAIL}" \
+  --role="projects/${PROJECT_ID}/roles/${CUSTOM_ROLE_ID}" >/dev/null
+
+# ====== Grant required viewer roles across services ======
+echo ">> Granting required viewer roles to Evidence SA..."
+EVIDENCE_ROLES=(
+  roles/iam.securityReviewer
+  roles/serviceusage.serviceUsageViewer
+  roles/cloudkms.viewer
+  roles/logging.configViewer
+  roles/monitoring.alertPolicyViewer
+  roles/monitoring.notificationChannelViewer
+  roles/container.viewer
+  roles/cloudsql.viewer
+)
+for role in "${EVIDENCE_ROLES[@]}"; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${EVIDENCE_SA_EMAIL}" \
-    --role="roles/viewer" >/dev/null
-fi
+    --role="${role}" >/dev/null
+done
 
 # ====== Allow your collector to impersonate Evidence SA ======
 echo ">> Granting roles/iam.serviceAccountTokenCreator to your collector on the Evidence SA..."
