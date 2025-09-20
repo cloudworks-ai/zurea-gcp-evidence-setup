@@ -113,8 +113,10 @@ echo ">> Verifying impersonation and bucket visibility..."
 
 # IAM policy updates can take a short time to propagate. Retry impersonation.
 ACCESS_TOKEN=""
+VERIFIED=0
 for attempt in {1..12}; do
   if ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="${EVIDENCE_SA_EMAIL}" 2>/dev/null)"; then
+    VERIFIED=1
     break
   fi
   echo ".. waiting for IAM propagation (attempt ${attempt}/12)"
@@ -125,30 +127,37 @@ if [[ -z "${ACCESS_TOKEN}" ]]; then
   echo "WARN: Could not impersonate ${EVIDENCE_SA_EMAIL} from user ${ACTIVE} after retries."
   echo "      This may be due to org policy restrictions on user-to-service-account impersonation."
   echo "      The collector service account (${COLLECTOR_SA_EMAIL}) DOES have TokenCreator on the Evidence SA."
-  echo "      If this is expected, you can skip in-shell verification."
-  exit 0
+  echo "      Proceeding without in-shell verification."
 fi
 
-BUCKETS_JSON="$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-  "https://storage.googleapis.com/storage/v1/b?project=${PROJECT_ID}")"
+if [[ ${VERIFIED} -eq 1 ]]; then
+  BUCKETS_JSON="$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+    "https://storage.googleapis.com/storage/v1/b?project=${PROJECT_ID}")"
 
-echo "Bucket,Encryption"
-if [[ "$(echo "${BUCKETS_JSON}" | jq -r '.items | length // 0')" -eq 0 ]]; then
-  echo "(no buckets found)"
+  echo "Bucket,Encryption"
+  if [[ "$(echo "${BUCKETS_JSON}" | jq -r '.items | length // 0')" -eq 0 ]]; then
+    echo "(no buckets found)"
+  else
+    for b in $(echo "${BUCKETS_JSON}" | jq -r '.items[].name'); do
+      ENC_JSON="$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        "https://storage.googleapis.com/storage/v1/b/${b}?fields=encryption")"
+      if echo "${ENC_JSON}" | jq -e '.encryption.defaultKmsKeyName' >/dev/null; then
+        echo "${b},CMEK"
+      else
+        echo "${b},Google-managed"
+      fi
+    done
+  fi
 else
-  for b in $(echo "${BUCKETS_JSON}" | jq -r '.items[].name'); do
-    ENC_JSON="$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-      "https://storage.googleapis.com/storage/v1/b/${b}?fields=encryption")"
-    if echo "${ENC_JSON}" | jq -e '.encryption.defaultKmsKeyName' >/dev/null; then
-      echo "${b},CMEK"
-    else
-      echo "${b},Google-managed"
-    fi
-  done
+  echo "(verification skipped)"
 fi
 
 echo
 echo "SUCCESS ✅"
 echo "Evidence SA: ${EVIDENCE_SA_EMAIL}"
 echo "Impersonation granted to collector: ${COLLECTOR_SA_EMAIL}"
-echo "Project scanned: ${PROJECT_ID}"
+if [[ ${VERIFIED} -eq 1 ]]; then
+  echo "Project scanned: ${PROJECT_ID}"
+else
+  echo "Verification: skipped (user impersonation restricted)"
+fi
