@@ -101,6 +101,13 @@ gcloud iam service-accounts add-iam-policy-binding "${EVIDENCE_SA_EMAIL}" \
   --member="serviceAccount:${COLLECTOR_SA_EMAIL}" \
   --role="roles/iam.serviceAccountTokenCreator" >/dev/null
 
+# Also allow the currently authenticated user to impersonate the Evidence SA
+# so that the verification step below can run from Cloud Shell.
+echo ">> Granting roles/iam.serviceAccountTokenCreator to the current user for verification..."
+gcloud iam service-accounts add-iam-policy-binding "${EVIDENCE_SA_EMAIL}" \
+  --member="user:${ACTIVE}" \
+  --role="roles/iam.serviceAccountTokenCreator" >/dev/null || true
+
 # ====== Verify: impersonation + bucket list + encryption ======
 echo ">> Verifying impersonation and bucket visibility..."
 ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="${EVIDENCE_SA_EMAIL}")"
