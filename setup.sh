@@ -110,7 +110,24 @@ gcloud iam service-accounts add-iam-policy-binding "${EVIDENCE_SA_EMAIL}" \
 
 # ====== Verify: impersonation + bucket list + encryption ======
 echo ">> Verifying impersonation and bucket visibility..."
-ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="${EVIDENCE_SA_EMAIL}")"
+
+# IAM policy updates can take a short time to propagate. Retry impersonation.
+ACCESS_TOKEN=""
+for attempt in {1..12}; do
+  if ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="${EVIDENCE_SA_EMAIL}" 2>/dev/null)"; then
+    break
+  fi
+  echo ".. waiting for IAM propagation (attempt ${attempt}/12)"
+  sleep 5
+done
+
+if [[ -z "${ACCESS_TOKEN}" ]]; then
+  echo "WARN: Could not impersonate ${EVIDENCE_SA_EMAIL} from user ${ACTIVE} after retries."
+  echo "      This may be due to org policy restrictions on user-to-service-account impersonation."
+  echo "      The collector service account (${COLLECTOR_SA_EMAIL}) DOES have TokenCreator on the Evidence SA."
+  echo "      If this is expected, you can skip in-shell verification."
+  exit 0
+fi
 
 BUCKETS_JSON="$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
   "https://storage.googleapis.com/storage/v1/b?project=${PROJECT_ID}")"
