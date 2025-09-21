@@ -1,178 +1,169 @@
 #!/usr/bin/env bash
-# Zurea – GCP Evidence Setup (GCS bucket metadata, cross-project)
-# Creates a read-only Evidence SA in the target project, grants least-priv perms,
-# and lets your Collector SA impersonate it. Verifies by listing buckets + encryption.
+# Zurea – GCP Evidence Setup (WIF / AWS → GCP, config-only)
+# - Creates Evidence SA in the target project
+# - Grants least-privilege read-only roles (no object data)
+# - Binds your AWS role (via Workload Identity Pool) to impersonate the SA
+# - Optional: temporary local verify (adds/removes TokenCreator for current user)
+
 set -euo pipefail
 
-# ====== YOU set this once (your collector SA) ======
-COLLECTOR_SA_EMAIL="${COLLECTOR_SA_EMAIL:-zurea-collector@cloudworks-gcp.iam.gserviceaccount.com}"
+# ========= YOU provide these (publish on your docs/website) =========
+# Your GCP host project number (numeric), WIF pool id, and your AWS role details:
+HOST_PROJECT_NUMBER="${HOST_PROJECT_NUMBER:-<YOUR_HOST_PROJECT_NUMBER>}"
+WIF_POOL_ID="${WIF_POOL_ID:-zurea-aws-pool}"
+WIF_PROVIDER_ID="${WIF_PROVIDER_ID:-aws}"
+AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-294393683475}"
+AWS_ROLE_NAME="${AWS_ROLE_NAME:-ZureaGCPCollectorReadRole}"
 
-# Defaults (customers can override via flags)
+# ========= Defaults (customer can override flags) =========
 EVIDENCE_SA_NAME="${EVIDENCE_SA_NAME:-zurea-evidence}"
 CUSTOM_ROLE_ID="${CUSTOM_ROLE_ID:-zureaBucketMetadataViewer}"
+DO_VERIFY="${DO_VERIFY:-0}"                   # 1 => temp TokenCreator to current user to verify now
 
 usage() {
   cat <<USG >&2
-Usage: $0 --project <PROJECT_ID> [--sa-name <NAME>]
-
-Creates service account and grants read-only access to list buckets and read encryption metadata.
-Then grants your collector SA impersonation and verifies access.
+Usage: $0 --project <PROJECT_ID> [--sa-name NAME] [--verify] \\
+          [--host-project-number N] [--pool-id ID] [--provider-id ID] \\
+          [--aws-account-id ID] [--aws-role-name NAME]
 
 Required:
-  --project <PROJECT_ID>        Customer project to scan
+  --project <PROJECT_ID>              Customer project ID to connect
 
-Optional:
-  --sa-name <NAME>              Evidence SA name (default: ${EVIDENCE_SA_NAME})
+Optional (usually prefilled by vendor docs; can be overridden):
+  --sa-name <NAME>                    Evidence SA name (default: ${EVIDENCE_SA_NAME})
+  --verify                            Temporarily allow current user to impersonate SA to verify, then remove
+  --host-project-number <NUM>         (default: ${HOST_PROJECT_NUMBER})
+  --pool-id <ID>                      WIF pool id (default: ${WIF_POOL_ID})
+  --provider-id <ID>                  WIF provider id (default: ${WIF_PROVIDER_ID})
+  --aws-account-id <ID>               Your AWS account id (default: ${AWS_ACCOUNT_ID})
+  --aws-role-name <NAME>              Your AWS collector role name (default: ${AWS_ROLE_NAME})
 
-Environment overrides (advanced):
-  COLLECTOR_SA_EMAIL=<your-collector@HOST.iam.gserviceaccount.com>
-  EVIDENCE_SA_NAME=<name>  CUSTOM_ROLE_ID=<id>
+Environment overrides:
+  HOST_PROJECT_NUMBER, WIF_POOL_ID, WIF_PROVIDER_ID, AWS_ACCOUNT_ID, AWS_ROLE_NAME,
+  EVIDENCE_SA_NAME, CUSTOM_ROLE_ID, DO_VERIFY
 USG
   exit 1
 }
 
-# ====== Parse flags ======
+# ========= Parse args =========
 PROJECT_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT_ID="$2"; shift 2;;
     --sa-name) EVIDENCE_SA_NAME="$2"; shift 2;;
+    --verify) DO_VERIFY=1; shift;;
+    --host-project-number) HOST_PROJECT_NUMBER="$2"; shift 2;;
+    --pool-id) WIF_POOL_ID="$2"; shift 2;;
+    --provider-id) WIF_PROVIDER_ID="$2"; shift 2;;
+    --aws-account-id) AWS_ACCOUNT_ID="$2"; shift 2;;
+    --aws-role-name) AWS_ROLE_NAME="$2"; shift 2;;
     *) usage;;
   esac
 done
 [[ -z "${PROJECT_ID}" ]] && usage
 
+# ========= Derived =========
 EVIDENCE_SA_EMAIL="${EVIDENCE_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-
-# ====== Prechecks ======
-command -v gcloud >/dev/null || { echo "gcloud not found"; exit 1; }
-command -v jq >/dev/null || { echo "jq not found (Cloud Shell includes jq)"; exit 1; }
-
-ACTIVE="$(gcloud config get-value account 2>/dev/null || true)"
-[[ -z "$ACTIVE" ]] && { echo "Not logged in. Run: gcloud auth login"; exit 1; }
+WIF_PRINCIPAL="principalSet://iam.googleapis.com/projects/${HOST_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL_ID}/providers/${WIF_PROVIDER_ID}/attribute.aws_role/${AWS_ROLE_NAME}"
 
 echo ">> Project: ${PROJECT_ID}"
-echo ">> Running as: ${ACTIVE}"
-echo ">> Collector SA: ${COLLECTOR_SA_EMAIL}"
+echo ">> Evidence SA: ${EVIDENCE_SA_EMAIL}"
+echo ">> WIF principal: ${WIF_PRINCIPAL}"
+
+# ========= Prechecks =========
+command -v gcloud >/dev/null || { echo "gcloud not found"; exit 1; }
+command -v jq >/dev/null || { echo "jq not found (Cloud Shell includes jq)"; exit 1; }
+ACTIVE="$(gcloud config get-value account 2>/dev/null || true)"
+[[ -z "$ACTIVE" ]] && { echo "Not logged in. Run: gcloud auth login"; exit 1; }
 gcloud config set project "${PROJECT_ID}" >/dev/null
 
 echo ">> Enabling required APIs (idempotent)..."
-gcloud services enable iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com >/dev/null
+gcloud services enable \
+  cloudresourcemanager.googleapis.com iam.googleapis.com iamcredentials.googleapis.com serviceusage.googleapis.com \
+  storage.googleapis.com cloudkms.googleapis.com logging.googleapis.com monitoring.googleapis.com \
+  compute.googleapis.com container.googleapis.com sqladmin.googleapis.com sts.googleapis.com >/dev/null
 
-# ====== Create Evidence SA (idempotent) ======
+# ========= Create Evidence SA (idempotent) =========
 if gcloud iam service-accounts describe "${EVIDENCE_SA_EMAIL}" >/dev/null 2>&1; then
-  echo ">> Evidence SA exists: ${EVIDENCE_SA_EMAIL}"
+  echo ">> Evidence SA exists."
 else
-  echo ">> Creating Evidence SA: ${EVIDENCE_SA_EMAIL}"
+  echo ">> Creating Evidence SA..."
   gcloud iam service-accounts create "${EVIDENCE_SA_NAME}" \
     --display-name="Zurea Evidence (read-only)" \
     --description="Read-only evidence collection for compliance" >/dev/null
 fi
 
-# ====== Grant minimal permissions to Evidence SA ======
-# Least-priv custom role: list buckets + read metadata
-echo ">> Ensuring custom role '${CUSTOM_ROLE_ID}' with bucket metadata permissions..."
+# ========= Grant least-privilege roles (no data/object reads) =========
+echo ">> Granting read-only roles…"
+for ROLE in \
+  roles/iam.securityReviewer \
+  roles/serviceusage.serviceUsageViewer \
+  roles/cloudkms.viewer \
+  roles/logging.configViewer \
+  roles/monitoring.alertPolicyViewer \
+  roles/monitoring.notificationChannelViewer \
+  roles/container.viewer \
+  roles/cloudsql.viewer
+do
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${EVIDENCE_SA_EMAIL}" --role="${ROLE}" >/dev/null || true
+done
+
+#!/usr/bin/env bash
+# Storage: least-priv custom role for bucket metadata only
+echo ">> Ensuring custom role '${CUSTOM_ROLE_ID}' (storage.buckets.list/get)…"
+cat > /tmp/zurea_bucket_meta_viewer.yaml <<'YAML'
+title: Zurea Bucket Metadata Viewer
+stage: GA
+description: List buckets and read bucket-level config only (no object access).
+includedPermissions:
+- storage.buckets.list
+- storage.buckets.get
+# - storage.buckets.getIamPolicy
+YAML
 if ! gcloud iam roles describe "${CUSTOM_ROLE_ID}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
   gcloud iam roles create "${CUSTOM_ROLE_ID}" \
-    --project "${PROJECT_ID}" \
-    --title="Zurea Bucket Metadata Viewer" \
-    --description="List buckets and read bucket-level config only (no object access)." \
-    --permissions="storage.buckets.list,storage.buckets.get" \
-    --stage="GA" >/dev/null
+    --project "${PROJECT_ID}" --file=/tmp/zurea_bucket_meta_viewer.yaml >/dev/null
 else
-  # Keep role metadata aligned (idempotent)
   gcloud iam roles update "${CUSTOM_ROLE_ID}" \
-    --project "${PROJECT_ID}" \
-    --title="Zurea Bucket Metadata Viewer" \
-    --description="List buckets and read bucket-level config only (no object access)." \
-    --stage="GA" >/dev/null
+    --project "${PROJECT_ID}" --file=/tmp/zurea_bucket_meta_viewer.yaml >/dev/null
 fi
-echo ">> Granting custom role to Evidence SA..."
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${EVIDENCE_SA_EMAIL}" \
   --role="projects/${PROJECT_ID}/roles/${CUSTOM_ROLE_ID}" >/dev/null
 
-# ====== Grant required viewer roles across services ======
-echo ">> Granting required viewer roles to Evidence SA..."
-EVIDENCE_ROLES=(
-  roles/iam.securityReviewer
-  roles/serviceusage.serviceUsageViewer
-  roles/cloudkms.viewer
-  roles/logging.configViewer
-  roles/monitoring.alertPolicyViewer
-  roles/monitoring.notificationChannelViewer
-  roles/container.viewer
-  roles/cloudsql.viewer
-)
-for role in "${EVIDENCE_ROLES[@]}"; do
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${EVIDENCE_SA_EMAIL}" \
-    --role="${role}" >/dev/null
-done
-
-# ====== Allow your collector to impersonate Evidence SA ======
-echo ">> Granting roles/iam.serviceAccountTokenCreator to your collector on the Evidence SA..."
+# ========= Bind WIF principal to impersonate Evidence SA =========
+echo ">> Granting roles/iam.workloadIdentityUser to your AWS role (via WIF) on the Evidence SA…"
 gcloud iam service-accounts add-iam-policy-binding "${EVIDENCE_SA_EMAIL}" \
-  --member="serviceAccount:${COLLECTOR_SA_EMAIL}" \
-  --role="roles/iam.serviceAccountTokenCreator" >/dev/null
+  --member="${WIF_PRINCIPAL}" \
+  --role="roles/iam.workloadIdentityUser" >/dev/null
 
-# Also allow the currently authenticated user to impersonate the Evidence SA
-# so that the verification step below can run from Cloud Shell.
-echo ">> Granting roles/iam.serviceAccountTokenCreator to the current user for verification..."
-gcloud iam service-accounts add-iam-policy-binding "${EVIDENCE_SA_EMAIL}" \
-  --member="user:${ACTIVE}" \
-  --role="roles/iam.serviceAccountTokenCreator" >/dev/null || true
+# ========= Optional: local verification (temp grant to current user) =========
+if [[ "${DO_VERIFY}" -eq 1 ]]; then
+  echo ">> [Verify] Temporarily allowing current user to impersonate Evidence SA…"
+  gcloud iam service-accounts add-iam-policy-binding "${EVIDENCE_SA_EMAIL}" \
+    --member="user:${ACTIVE}" --role="roles/iam.serviceAccountTokenCreator" >/dev/null
 
-# ====== Verify: impersonation + bucket list + encryption ======
-echo ">> Verifying impersonation and bucket visibility..."
+  echo ">> [Verify] Trying to get token and list buckets…"
+  TOKEN="$(gcloud auth print-access-token --impersonate-service-account="${EVIDENCE_SA_EMAIL}")" || {
+    echo "!! Could not impersonate for verification. Check org policies."
+  }
 
-# IAM policy updates can take a short time to propagate. Retry impersonation.
-ACCESS_TOKEN=""
-VERIFIED=0
-for attempt in {1..12}; do
-  if ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="${EVIDENCE_SA_EMAIL}" 2>/dev/null)"; then
-    VERIFIED=1
-    break
+  if [[ -n "${TOKEN:-}" ]]; then
+    RESP="$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+      "https://storage.googleapis.com/storage/v1/b?project=${PROJECT_ID}")"
+    COUNT="$(echo "$RESP" | jq -r '.items | length // 0')"
+    echo "Buckets visible: ${COUNT}"
   fi
-  echo ".. waiting for IAM propagation (attempt ${attempt}/12)"
-  sleep 5
-done
 
-if [[ -z "${ACCESS_TOKEN}" ]]; then
-  echo "WARN: Could not impersonate ${EVIDENCE_SA_EMAIL} from user ${ACTIVE} after retries."
-  echo "      This may be due to org policy restrictions on user-to-service-account impersonation."
-  echo "      The collector service account (${COLLECTOR_SA_EMAIL}) DOES have TokenCreator on the Evidence SA."
-  echo "      Proceeding without in-shell verification."
-fi
-
-if [[ ${VERIFIED} -eq 1 ]]; then
-  BUCKETS_JSON="$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-    "https://storage.googleapis.com/storage/v1/b?project=${PROJECT_ID}")"
-
-  echo "Bucket,Encryption"
-  if [[ "$(echo "${BUCKETS_JSON}" | jq -r '.items | length // 0')" -eq 0 ]]; then
-    echo "(no buckets found)"
-  else
-    for b in $(echo "${BUCKETS_JSON}" | jq -r '.items[].name'); do
-      ENC_JSON="$(curl -s -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-        "https://storage.googleapis.com/storage/v1/b/${b}?fields=encryption")"
-      if echo "${ENC_JSON}" | jq -e '.encryption.defaultKmsKeyName' >/dev/null; then
-        echo "${b},CMEK"
-      else
-        echo "${b},Google-managed"
-      fi
-    done
-  fi
-else
-  echo "(verification skipped)"
+  echo ">> [Verify] Removing temporary TokenCreator from current user…"
+  gcloud iam service-accounts remove-iam-policy-binding "${EVIDENCE_SA_EMAIL}" \
+    --member="user:${ACTIVE}" --role="roles/iam.serviceAccountTokenCreator" >/dev/null || true
 fi
 
 echo
 echo "SUCCESS ✅"
+echo "Project: ${PROJECT_ID}"
 echo "Evidence SA: ${EVIDENCE_SA_EMAIL}"
-echo "Impersonation granted to collector: ${COLLECTOR_SA_EMAIL}"
-if [[ ${VERIFIED} -eq 1 ]]; then
-  echo "Project scanned: ${PROJECT_ID}"
-else
-  echo "Verification: skipped (user impersonation restricted)"
-fi
+echo "WIF principal bound: ${WIF_PRINCIPAL}"
+echo "Note: Your AWS role can now impersonate this SA via Workload Identity Federation."
