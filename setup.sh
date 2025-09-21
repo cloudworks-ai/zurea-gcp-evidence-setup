@@ -7,6 +7,9 @@
 
 set -euo pipefail
 
+# Make gcloud fully non-interactive (auto-approve prompts)
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
 # ========= YOU provide these (publish on your docs/website) =========
 # Your GCP host project number (numeric), WIF pool id, and your AWS role details:
 HOST_PROJECT_NUMBER="${HOST_PROJECT_NUMBER:-26979796123}"
@@ -133,10 +136,10 @@ includedPermissions:
 YAML
 if ! gcloud iam roles describe "${CUSTOM_ROLE_ID}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
   gcloud iam roles create "${CUSTOM_ROLE_ID}" \
-    --project "${PROJECT_ID}" --file=/tmp/zurea_bucket_meta_viewer.yaml >/dev/null
+    --project "${PROJECT_ID}" --file=/tmp/zurea_bucket_meta_viewer.yaml --quiet >/dev/null
 else
   gcloud iam roles update "${CUSTOM_ROLE_ID}" \
-    --project "${PROJECT_ID}" --file=/tmp/zurea_bucket_meta_viewer.yaml >/dev/null
+    --project "${PROJECT_ID}" --file=/tmp/zurea_bucket_meta_viewer.yaml --quiet >/dev/null
 fi
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${EVIDENCE_SA_EMAIL}" \
