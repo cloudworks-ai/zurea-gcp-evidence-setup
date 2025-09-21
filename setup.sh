@@ -9,9 +9,9 @@ set -euo pipefail
 
 # ========= YOU provide these (publish on your docs/website) =========
 # Your GCP host project number (numeric), WIF pool id, and your AWS role details:
-HOST_PROJECT_NUMBER="${HOST_PROJECT_NUMBER:-<YOUR_HOST_PROJECT_NUMBER>}"
+HOST_PROJECT_NUMBER="${HOST_PROJECT_NUMBER:-26979796123}"
 WIF_POOL_ID="${WIF_POOL_ID:-zurea-aws-pool}"
-WIF_PROVIDER_ID="${WIF_PROVIDER_ID:-aws}"
+WIF_PROVIDER_ID="${WIF_PROVIDER_ID:-aws-main}"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-294393683475}"
 AWS_ROLE_NAME="${AWS_ROLE_NAME:-ZureaGCPCollectorReadRole}"
 
