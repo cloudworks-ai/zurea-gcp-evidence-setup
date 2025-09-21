@@ -64,7 +64,7 @@ done
 
 # ========= Derived =========
 EVIDENCE_SA_EMAIL="${EVIDENCE_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-WIF_PRINCIPAL="principalSet://iam.googleapis.com/projects/${HOST_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL_ID}/providers/${WIF_PROVIDER_ID}/attribute.aws_role/${AWS_ROLE_NAME}"
+WIF_PRINCIPAL="principalSet://iam.googleapis.com/projects/${HOST_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL_ID}/attribute.aws_role/${AWS_ROLE_NAME}"
 
 echo ">> Project: ${PROJECT_ID}"
 echo ">> Evidence SA: ${EVIDENCE_SA_EMAIL}"
@@ -110,7 +110,6 @@ for ROLE in \
   roles/iam.securityReviewer \
   roles/serviceusage.serviceUsageViewer \
   roles/cloudkms.viewer \
-  roles/logging.configViewer \
   roles/monitoring.alertPolicyViewer \
   roles/monitoring.notificationChannelViewer \
   roles/container.viewer \
