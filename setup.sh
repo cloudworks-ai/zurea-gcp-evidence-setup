@@ -78,10 +78,21 @@ ACTIVE="$(gcloud config get-value account 2>/dev/null || true)"
 gcloud config set project "${PROJECT_ID}" >/dev/null
 
 echo ">> Enabling required APIs (idempotent)..."
+# Minimal APIs that do not require billing (needed for IAM/WIF and verification)
 gcloud services enable \
   cloudresourcemanager.googleapis.com iam.googleapis.com iamcredentials.googleapis.com serviceusage.googleapis.com \
   storage.googleapis.com cloudkms.googleapis.com logging.googleapis.com monitoring.googleapis.com \
-  compute.googleapis.com container.googleapis.com sqladmin.googleapis.com sts.googleapis.com >/dev/null
+  sts.googleapis.com >/dev/null
+
+# Enable heavy APIs only if billing is enabled (compute/container/sql)
+BILLING_ENABLED="$(gcloud beta billing projects describe "${PROJECT_ID}" --format='value(billingEnabled)' 2>/dev/null || true)"
+if [[ "${BILLING_ENABLED}" == "True" ]]; then
+  echo ">> Project has billing enabled; enabling compute/container/sqladmin APIs…"
+  gcloud services enable \
+    compute.googleapis.com container.googleapis.com sqladmin.googleapis.com >/dev/null
+else
+  echo ">> Billing not enabled; skipping compute/container/sqladmin API activation."
+fi
 
 # ========= Create Evidence SA (idempotent) =========
 if gcloud iam service-accounts describe "${EVIDENCE_SA_EMAIL}" >/dev/null 2>&1; then
