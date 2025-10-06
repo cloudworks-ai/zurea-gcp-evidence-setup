@@ -121,7 +121,7 @@ for ROLE in \
   roles/cloudsql.viewer
 do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${EVIDENCE_SA_EMAIL}" --role="${ROLE}" >/dev/null || true
+    --member="serviceAccount:${EVIDENCE_SA_EMAIL}" --role="${ROLE}" --condition=None >/dev/null || true
 done
 
 #!/usr/bin/env bash
@@ -145,7 +145,7 @@ else
 fi
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${EVIDENCE_SA_EMAIL}" \
-  --role="projects/${PROJECT_ID}/roles/${CUSTOM_ROLE_ID}" >/dev/null
+  --role="projects/${PROJECT_ID}/roles/${CUSTOM_ROLE_ID}" --condition=None >/dev/null
 
 # ========= Bind WIF principal to impersonate Evidence SA =========
 echo ">> Granting roles/iam.workloadIdentityUser to your AWS role (via WIF) on the Evidence SA…"
