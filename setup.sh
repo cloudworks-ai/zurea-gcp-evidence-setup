@@ -113,6 +113,7 @@ for ROLE in \
   roles/iam.securityReviewer \
   roles/serviceusage.serviceUsageViewer \
   roles/cloudkms.viewer \
+  roles/compute.viewer \
   roles/monitoring.alertPolicyViewer \
   roles/monitoring.notificationChannelViewer \
   roles/container.viewer \
@@ -132,7 +133,7 @@ description: List buckets and read bucket-level config only (no object access).
 includedPermissions:
 - storage.buckets.list
 - storage.buckets.get
-# - storage.buckets.getIamPolicy
+- storage.buckets.getIamPolicy
 YAML
 if ! gcloud iam roles describe "${CUSTOM_ROLE_ID}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
   gcloud iam roles create "${CUSTOM_ROLE_ID}" \
