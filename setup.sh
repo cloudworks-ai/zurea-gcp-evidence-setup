@@ -113,6 +113,7 @@ for ROLE in \
   roles/iam.securityReviewer \
   roles/serviceusage.serviceUsageViewer \
   roles/cloudkms.viewer \
+  roles/compute.networkViewer \
   roles/compute.viewer \
   roles/monitoring.alertPolicyViewer \
   roles/monitoring.notificationChannelViewer \
